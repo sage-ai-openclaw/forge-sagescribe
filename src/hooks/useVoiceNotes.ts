@@ -5,6 +5,17 @@ export interface VoiceNote {
   id: number;
   duration_ms: number | null;
   created_at: string;
+  transcript: string | null;
+  transcript_status: 'pending' | 'processing' | 'completed' | 'failed';
+  transcript_error: string | null;
+}
+
+export interface TranscriptionStatus {
+  id: number;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  transcript: string | null;
+  error: string | null;
+  updatedAt: string;
 }
 
 export interface UseVoiceNotesReturn {
@@ -14,6 +25,7 @@ export interface UseVoiceNotesReturn {
   saveRecording: (blob: Blob, durationMs: number) => Promise<void>;
   fetchNotes: () => Promise<void>;
   deleteNote: (id: number) => Promise<void>;
+  getTranscriptionStatus: (id: number) => Promise<TranscriptionStatus>;
   clearError: () => void;
 }
 
@@ -39,6 +51,11 @@ export function useVoiceNotes(): UseVoiceNotesReturn {
     }
   }, []);
 
+  const getTranscriptionStatus = useCallback(async (id: number): Promise<TranscriptionStatus> => {
+    const data = await apiFetch(`/api/voice-notes/${id}/transcription`);
+    return data;
+  }, []);
+
   const saveRecording = useCallback(async (blob: Blob, durationMs: number) => {
     setIsLoading(true);
     setError(null);
@@ -62,15 +79,63 @@ export function useVoiceNotes(): UseVoiceNotesReturn {
         throw new Error(errorData.error || 'Failed to save recording');
       }
 
-      // Refresh the notes list after saving
-      await fetchNotes();
+      const result = await response.json();
+      
+      // Add new note to list with pending status
+      const newNote: VoiceNote = {
+        id: result.id,
+        duration_ms: durationMs,
+        created_at: new Date().toISOString(),
+        transcript: null,
+        transcript_status: 'pending',
+        transcript_error: null,
+      };
+      setNotes(prev => [newNote, ...prev]);
+
+      // Start polling for transcription status
+      pollTranscriptionStatus(result.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save recording');
       throw err;
     } finally {
       setIsLoading(false);
     }
-  }, [fetchNotes]);
+  }, []);
+
+  const pollTranscriptionStatus = useCallback(async (noteId: number) => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const status = await getTranscriptionStatus(noteId);
+        
+        // Update the note in the list
+        setNotes(prev => 
+          prev.map(note => 
+            note.id === noteId 
+              ? { 
+                  ...note, 
+                  transcript: status.transcript,
+                  transcript_status: status.status,
+                  transcript_error: status.error,
+                }
+              : note
+          )
+        );
+
+        // Stop polling if completed or failed
+        if (status.status === 'completed' || status.status === 'failed') {
+          clearInterval(pollInterval);
+        }
+      } catch (err) {
+        console.error('Error polling transcription status:', err);
+        clearInterval(pollInterval);
+      }
+    }, 2000);
+
+    // Stop polling after 5 minutes (transcription shouldn't take that long)
+    setTimeout(() => {
+      clearInterval(pollInterval);
+    }, 5 * 60 * 1000);
+  }, [getTranscriptionStatus]);
 
   const deleteNote = useCallback(async (id: number) => {
     setIsLoading(true);
@@ -93,6 +158,7 @@ export function useVoiceNotes(): UseVoiceNotesReturn {
     saveRecording,
     fetchNotes,
     deleteNote,
+    getTranscriptionStatus,
     clearError,
   };
 }

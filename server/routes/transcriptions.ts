@@ -1,123 +1,160 @@
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
-import fs from 'fs';
-import jwt from 'jsonwebtoken';
+import { fileURLToPath } from 'url';
 import OpenAI from 'openai';
-import db from '../db.js';
+import db from '../database.js';
+import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB
-
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = path.join(process.cwd(), 'uploads');
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-    cb(null, uploadDir);
-  },
+  destination: path.join(__dirname, '../uploads'),
   filename: (req, file, cb) => {
-    const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(2)}${path.extname(file.originalname)}`;
-    cb(null, uniqueName);
-  }
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
+  },
 });
 
 const upload = multer({
   storage,
-  limits: { fileSize: MAX_FILE_SIZE },
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
   fileFilter: (req, file, cb) => {
-    const allowedMimes = ['audio/mpeg', 'audio/wav', 'audio/wave', 'audio/x-wav', 'audio/mp4', 'audio/m4a', 'audio/webm', 'audio/ogg'];
-    if (allowedMimes.includes(file.mimetype)) {
+    const allowedTypes = ['audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/webm', 'audio/ogg'];
+    if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
       cb(new Error('Invalid file type. Only audio files are allowed.'));
     }
-  }
+  },
 });
 
-const authenticate = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Unauthorized' });
-  
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { userId: number };
-    (req as any).userId = decoded.userId;
-    next();
-  } catch {
-    res.status(401).json({ error: 'Invalid token' });
-  }
-};
-
-router.post('/upload', authenticate, upload.single('audio'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
-  }
-
-  const userId = (req as any).userId;
-  const { filename, originalname, size } = req.file;
-
-  if (size > MAX_FILE_SIZE) {
-    fs.unlinkSync(req.file.path);
-    return res.status(400).json({ error: 'File exceeds 25MB limit' });
-  }
-
-  const result = db.prepare(
-    'INSERT INTO transcriptions (user_id, filename, original_name, status) VALUES (?, ?, ?, ?)'
-  ).run(userId, filename, originalname, 'processing');
-
-  const transcriptionId = result.lastInsertRowid;
-
-  res.json({ id: transcriptionId, status: 'processing' });
-
-  // Process in background
-  processTranscription(transcriptionId, req.file!.path);
-});
-
-async function processTranscription(id: number, filePath: string) {
-  try {
-    const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(filePath),
-      model: 'whisper-1',
-      response_format: 'verbose_json',
-      timestamp_granularities: ['segment']
-    });
-
-    const segments = (transcription as any).segments || [];
-
-    db.prepare(
-      'UPDATE transcriptions SET status = ?, text = ?, segments = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?'
-    ).run('completed', transcription.text, JSON.stringify(segments), id);
-
-    fs.unlinkSync(filePath);
-  } catch (error: any) {
-    db.prepare(
-      'UPDATE transcriptions SET status = ?, error = ? WHERE id = ?'
-    ).run('failed', error.message, id);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  }
+// Get usage limits based on tier
+function getTierLimits(tier: string) {
+  return tier === 'pro' 
+    ? { maxTranscriptions: 1000, maxDuration: 7200 } // Pro: 1000/month, 2 hours per file
+    : { maxTranscriptions: 10, maxDuration: 600 };   // Free: 10/month, 10 min per file
 }
 
-router.get('/', authenticate, (req, res) => {
-  const userId = (req as any).userId;
-  const transcriptions = db.prepare(
-    'SELECT id, original_name, status, text, created_at, completed_at FROM transcriptions WHERE user_id = ? ORDER BY created_at DESC'
-  ).all(userId);
-  res.json(transcriptions);
+// Check usage
+function checkUsage(userId: number, tier: string) {
+  const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+  const limits = getTierLimits(tier);
+  
+  let usage = db.prepare('SELECT * FROM usage WHERE user_id = ? AND month = ?').get(userId, month) as any;
+  
+  if (!usage) {
+    db.prepare('INSERT INTO usage (user_id, month, transcription_count, total_seconds) VALUES (?, ?, 0, 0)').run(userId, month);
+    usage = { transcription_count: 0, total_seconds: 0 };
+  }
+
+  return {
+    canTranscribe: usage.transcription_count < limits.maxTranscriptions,
+    remaining: limits.maxTranscriptions - usage.transcription_count,
+    limits,
+  };
+}
+
+router.post('/', authenticateToken, upload.single('audio'), async (req, res) => {
+  try {
+    const userId = (req as any).userId;
+    const user = db.prepare('SELECT tier FROM users WHERE id = ?').get(userId) as any;
+
+    const usage = checkUsage(userId, user.tier);
+    if (!usage.canTranscribe) {
+      return res.status(429).json({ 
+        error: 'Monthly limit reached. Upgrade to Pro for more transcriptions.',
+        upgradeRequired: true 
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No audio file provided' });
+    }
+
+    const transcription = await openai.audio.transcriptions.create({
+      file: require('fs').createReadStream(req.file.path),
+      model: 'whisper-1',
+    });
+
+    // Estimate duration (rough approximation: ~150 words per minute)
+    const wordCount = transcription.text.split(/\s+/).length;
+    const estimatedDuration = Math.round((wordCount / 150) * 60);
+
+    if (estimatedDuration > usage.limits.maxDuration) {
+      return res.status(400).json({ 
+        error: `Audio too long. ${user.tier === 'pro' ? '2 hours' : '10 minutes'} max per file.` 
+      });
+    }
+
+    // Save transcription
+    const result = db.prepare(`
+      INSERT INTO transcriptions (user_id, filename, original_name, text, duration)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(userId, req.file.filename, req.file.originalname, transcription.text, estimatedDuration);
+
+    // Update usage
+    const month = new Date().toISOString().slice(0, 7);
+    db.prepare(`
+      UPDATE usage 
+      SET transcription_count = transcription_count + 1,
+          total_seconds = total_seconds + ?
+      WHERE user_id = ? AND month = ?
+    `).run(estimatedDuration, userId, month);
+
+    res.json({
+      id: result.lastInsertRowid,
+      text: transcription.text,
+      duration: estimatedDuration,
+      remaining: usage.remaining - 1,
+    });
+  } catch (error) {
+    console.error('Transcription error:', error);
+    res.status(500).json({ error: 'Transcription failed' });
+  }
 });
 
-router.get('/:id', authenticate, (req, res) => {
-  const userId = (req as any).userId;
-  const transcription = db.prepare(
-    'SELECT * FROM transcriptions WHERE id = ? AND user_id = ?'
-  ).get(req.params.id, userId) as any;
-  
-  if (!transcription) return res.status(404).json({ error: 'Not found' });
-  
-  res.json({
-    ...transcription,
-    segments: transcription.segments ? JSON.parse(transcription.segments) : null
-  });
+router.get('/', authenticateToken, (req, res) => {
+  try {
+    const userId = (req as any).userId;
+    const transcriptions = db.prepare(`
+      SELECT id, original_name, text, duration, created_at
+      FROM transcriptions
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+    `).all(userId);
+
+    res.json(transcriptions);
+  } catch (error) {
+    console.error('Get transcriptions error:', error);
+    res.status(500).json({ error: 'Failed to get transcriptions' });
+  }
+});
+
+router.get('/usage', authenticateToken, (req, res) => {
+  try {
+    const userId = (req as any).userId;
+    const user = db.prepare('SELECT tier FROM users WHERE id = ?').get(userId) as any;
+    const month = new Date().toISOString().slice(0, 7);
+    
+    const usage = db.prepare('SELECT * FROM usage WHERE user_id = ? AND month = ?').get(userId, month) as any;
+    const limits = getTierLimits(user.tier);
+
+    res.json({
+      tier: user.tier,
+      used: usage?.transcription_count || 0,
+      limit: limits.maxTranscriptions,
+      remaining: limits.maxTranscriptions - (usage?.transcription_count || 0),
+    });
+  } catch (error) {
+    console.error('Get usage error:', error);
+    res.status(500).json({ error: 'Failed to get usage' });
+  }
 });
 
 export default router;

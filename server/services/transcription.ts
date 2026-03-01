@@ -1,4 +1,5 @@
 import db from '../db.js';
+import { writeFileSync, createReadStream, existsSync, unlinkSync } from 'fs';
 
 interface WhisperResponse {
   text: string;
@@ -20,19 +21,18 @@ export async function transcribeAudio(audioBuffer: Buffer, mimeType: string): Pr
   
   try {
     // Write buffer to temp file
-    const fs = await import('fs');
-    fs.writeFileSync(tempFilePath, audioBuffer);
+    writeFileSync(tempFilePath, audioBuffer);
 
-    // Create form data for the Whisper API
-    const FormData = (await import('form-data')).default;
+    // Create form data for the Whisper API using native FormData
     const form = new FormData();
-    form.append('file', fs.createReadStream(tempFilePath));
+    const file = new Blob([audioBuffer], { type: mimeType });
+    form.append('file', file, `audio.${extension}`);
     form.append('model', 'whisper-1');
 
     // Call the Whisper API
     const response = await fetch('http://truenas-scale:5555/transcribe', {
       method: 'POST',
-      body: form as any,
+      body: form,
     });
 
     if (!response.ok) {
@@ -48,9 +48,8 @@ export async function transcribeAudio(audioBuffer: Buffer, mimeType: string): Pr
   } finally {
     // Clean up temp file
     try {
-      const fs = await import('fs');
-      if (fs.existsSync(tempFilePath)) {
-        fs.unlinkSync(tempFilePath);
+      if (existsSync(tempFilePath)) {
+        unlinkSync(tempFilePath);
       }
     } catch (cleanupError) {
       console.error('Error cleaning up temp file:', cleanupError);
