@@ -1,20 +1,22 @@
 export interface User {
+  id: number;
   email: string;
-  token: string;
+  tier: 'free' | 'pro';
+}
+
+export interface Usage {
+  tier: 'free' | 'pro';
+  dailyLimit: number | null;
+  durationLimit: number | null;
+  usedToday: number;
+  totalDurationToday: number;
+  remainingToday: number | null;
 }
 
 export interface Transcription {
   id: number;
-  originalFilename: string;
-  duration: number;
+  filename: string;
   text: string;
-  createdAt: string;
-}
-
-export interface TranscriptionPreview {
-  id: number;
-  originalFilename: string;
-  duration: number;
-  preview: string;
-  createdAt: string;
+  duration_seconds: number | null;
+  created_at: string;
 }
