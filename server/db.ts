@@ -31,6 +31,24 @@ db.exec(`
     FOREIGN KEY (user_id) REFERENCES users(id),
     UNIQUE(user_id, date)
   );
+
+  CREATE TABLE IF NOT EXISTS voice_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    audio_blob BLOB NOT NULL,
+    mime_type TEXT NOT NULL,
+    duration_ms INTEGER,
+    transcript TEXT,
+    transcript_status TEXT DEFAULT 'pending',
+    transcript_error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_voice_notes_user_id ON voice_notes(user_id);
+  CREATE INDEX IF NOT EXISTS idx_voice_notes_created_at ON voice_notes(created_at);
+  CREATE INDEX IF NOT EXISTS idx_voice_notes_status ON voice_notes(transcript_status);
 `);
 
 export default db;

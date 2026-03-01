@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import authRoutes from './routes/auth.js';
 import transcriptionRoutes from './routes/transcriptions.js';
+import voiceNotesRoutes from './routes/voiceNotes.js';
 import stripeRoutes from './routes/stripe.js';
 import { initializeDatabase } from './database.js';
 
@@ -29,6 +30,7 @@ app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/transcriptions', transcriptionRoutes);
+app.use('/api/voice-notes', voiceNotesRoutes);
 app.use('/api/stripe', stripeRoutes);
 
 // Serve static files in production
