@@ -29,6 +29,19 @@ export const initDb = () => {
       completed_at DATETIME,
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
+
+    CREATE TABLE IF NOT EXISTS voice_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      audio_blob BLOB NOT NULL,
+      mime_type TEXT NOT NULL,
+      duration_ms INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_voice_notes_user_id ON voice_notes(user_id);
+    CREATE INDEX IF NOT EXISTS idx_voice_notes_created_at ON voice_notes(created_at);
   `);
 };
 
